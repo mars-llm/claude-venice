@@ -1,0 +1,24 @@
+# Config files with real API keys
+config-router.json
+*.local.json
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Node
+node_modules/
+
+# Output
+venice-output/

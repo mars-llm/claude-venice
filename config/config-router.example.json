@@ -1,0 +1,70 @@
+{
+  "server": {
+    "port": 3456,
+    "host": "127.0.0.1"
+  },
+  "routing": {
+    "rules": {
+      "default": {
+        "provider": "venice",
+        "model": "claude-opus-45"
+      },
+      "background": {
+        "provider": "venice",
+        "model": "claude-opus-45"
+      },
+      "thinking": {
+        "provider": "venice",
+        "model": "claude-opus-45"
+      },
+      "longcontext": {
+        "provider": "venice",
+        "model": "claude-opus-45"
+      }
+    },
+    "defaultProvider": "venice",
+    "providers": {
+      "venice": {
+        "type": "openai",
+        "endpoint": "https://api.venice.ai/api/v1/chat/completions",
+        "authentication": {
+          "type": "bearer",
+          "credentials": {
+            "apiKey": "YOUR_VENICE_API_KEY_HERE"
+          }
+        },
+        "settings": {
+          "categoryMappings": {
+            "default": true,
+            "background": true,
+            "thinking": true,
+            "longcontext": true
+          },
+          "models": [
+            "claude-opus-45",
+            "deepseek-r1-671b",
+            "qwen-2.5-coder-32b",
+            "qwen3-235b",
+            "qwen-2.5-qwq-32b",
+            "zai-org-glm-4.6",
+            "llama-3.3-70b",
+            "mistral-31-24b",
+            "wan-2.5-preview",
+            "kling-2.5-turbo-pro",
+            "sora-2",
+            "tts-kokoro"
+          ],
+          "defaultModel": "claude-opus-45"
+        }
+      }
+    }
+  },
+  "debug": {
+    "enabled": false,
+    "logLevel": "warn",
+    "traceRequests": false,
+    "saveRequests": false,
+    "logDir": "~/.claude-code-router/logs"
+  },
+  "hooks": []
+}

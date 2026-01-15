@@ -1,0 +1,542 @@
+#!/usr/bin/env bash
+# venice-generate: Generate media via Venice API
+#
+# Usage:
+#   venice-generate video "prompt" [options]
+#   venice-generate image "prompt" [options]
+#   venice-generate audio "text" [--voice <voice>]
+#   venice-generate voices    # List available voices
+#   venice-generate models    # List generation models
+#   venice-generate status <queue-id>  # Check video job status
+
+set -e
+
+VERSION="${VERSION:-3.0.0}"
+
+# mars-llm branding - compact by default
+show_banner() {
+    [[ -t 1 ]] || return 0
+    echo -e "${CYAN}◢◣${RESET} ${BOLD}mars-llm${RESET} ${DIM}•${RESET} venice-generate ${DIM}v${VERSION}${RESET}"
+}
+
+# Hidden easter egg: --mars
+show_mars() {
+    echo -e "\033[0;36m"
+    cat << 'MARS'
+    ┌─┬─┬─┐
+    │ │ │ │    ╭─────────────╮
+   ┌┴─┴─┴─┴┐   │  mars-llm   │
+   │ ◣   ◢ │   ╰─────────────╯
+   │  ───  │  venice-generate
+   └───────┘
+MARS
+    echo -e "\033[0m"
+    echo -e "  version: $VERSION"
+}
+VENICE_API_KEY="${VENICE_API_KEY:-}"
+OUTPUT_DIR="$HOME/venice-output"
+
+# Colors (disabled if not a terminal)
+if [[ -t 1 ]]; then
+    BOLD='\033[1m'
+    DIM='\033[2m'
+    GREEN='\033[0;32m'
+    YELLOW='\033[0;33m'
+    BLUE='\033[0;34m'
+    CYAN='\033[0;36m'
+    RED='\033[0;31m'
+    RESET='\033[0m'
+else
+    BOLD='' DIM='' GREEN='' YELLOW='' BLUE='' CYAN='' RED='' RESET=''
+fi
+
+# Spinner for long operations
+spinner() {
+    local pid=$1
+    local msg="${2:-Working}"
+    local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local i=0
+
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r${DIM}%s${RESET} %s... " "${spin:i++%10:1}" "$msg"
+        sleep 0.1
+    done
+    printf "\r"
+}
+
+# Progress message
+info() {
+    echo -e "${BLUE}→${RESET} $1"
+}
+
+success() {
+    echo -e "${GREEN}✓${RESET} $1"
+}
+
+error() {
+    echo -e "${RED}✗${RESET} $1" >&2
+}
+
+warn() {
+    echo -e "${YELLOW}!${RESET} $1"
+}
+
+# Print section header
+header() {
+    echo ""
+    echo -e "${BOLD}$1${RESET}"
+    echo -e "${DIM}────────────────────────────────────────${RESET}"
+}
+
+# Print success message with file path
+file_saved() {
+    local label="$1"
+    local filename="$2"
+    echo ""
+    success "$label saved!"
+    echo ""
+    echo -e "  ${BOLD}File:${RESET} $filename"
+    echo ""
+}
+
+# Run curl in background with spinner, save output to file
+curl_with_spinner() {
+    local msg="$1"
+    local output_file="$2"
+    shift 2
+    curl -s "$@" -o "$output_file" &
+    local curl_pid=$!
+    spinner $curl_pid "$msg"
+    wait $curl_pid
+}
+
+# Require a value or exit with error
+require_value() {
+    local value="$1"
+    local usage="$2"
+    local label="${3:-prompt}"
+    if [[ -z "$value" ]]; then
+        error "No $label provided"
+        echo ""
+        echo "Usage: venice-generate $usage"
+        exit 1
+    fi
+}
+
+# Get API key
+if [[ -z "$VENICE_API_KEY" ]]; then
+    CONFIG_FILE="$HOME/.claude-code-router/config-router.json"
+    if [[ -f "$CONFIG_FILE" ]]; then
+        VENICE_API_KEY=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$CONFIG_FILE')).routing.providers.venice.authentication.credentials.apiKey)" 2>/dev/null || echo "")
+    fi
+fi
+
+if [[ -z "$VENICE_API_KEY" ]]; then
+    error "VENICE_API_KEY not set"
+    echo ""
+    echo "Set it via:"
+    echo "  export VENICE_API_KEY=your-key"
+    echo ""
+    echo "Or add it to ~/.claude-code-router/config-router.json"
+    exit 1
+fi
+
+mkdir -p "$OUTPUT_DIR"
+
+# Helper: JSON-encode a string safely (handles special chars)
+json_encode() {
+    printf '%s' "$1" | jq -Rs .
+}
+
+generate_video() {
+    local prompt="$1"
+    local model="${2:-sora-2-text-to-video}"
+    local duration="${3:-4s}"
+    local aspect="${4:-16:9}"
+
+    header "Video Generation"
+    info "Model: ${CYAN}$model${RESET}"
+    info "Duration: ${CYAN}$duration${RESET}"
+    info "Aspect ratio: ${CYAN}$aspect${RESET}"
+    info "Prompt: ${CYAN}$prompt${RESET}"
+    echo ""
+
+    info "Queuing video generation..."
+
+    local response
+    response=$(curl -s --max-time 30 "https://api.venice.ai/api/v1/video/queue" \
+        -H "Authorization: Bearer $VENICE_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "{\"model\": \"$model\", \"prompt\": $(json_encode "$prompt"), \"duration\": \"$duration\", \"aspect_ratio\": \"$aspect\"}")
+
+    local queue_id
+    queue_id=$(echo "$response" | jq -r '.queue_id // empty')
+
+    if [[ -z "$queue_id" ]]; then
+        error "Failed to queue video"
+        echo ""
+        echo "Response: $response"
+        return 1
+    fi
+
+    echo ""
+    success "Video generation queued!"
+    echo ""
+    echo -e "  ${BOLD}Queue ID:${RESET} $queue_id"
+    echo ""
+    echo -e "  ${DIM}Video generation typically takes 1-5 minutes.${RESET}"
+    echo -e "  ${DIM}Check status with:${RESET}"
+    echo ""
+    echo -e "    ${CYAN}venice-generate status $queue_id${RESET}"
+    echo ""
+}
+
+generate_image() {
+    local prompt="$1"
+    local model="${2:-nano-banana-pro}"
+    local width="${3:-1024}"
+    local height="${4:-1024}"
+
+    header "Image Generation"
+    info "Model: ${CYAN}$model${RESET}"
+    info "Size: ${CYAN}${width}x${height}${RESET}"
+    info "Prompt: ${CYAN}$prompt${RESET}"
+    echo ""
+
+    info "Generating image (this may take 10-30 seconds)..."
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    curl_with_spinner "Generating image" "$tmpfile" \
+        --max-time 120 "https://api.venice.ai/api/v1/image/generate" \
+        -H "Authorization: Bearer $VENICE_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "{\"model\": \"$model\", \"prompt\": $(json_encode "$prompt"), \"width\": $width, \"height\": $height}"
+
+    local response
+    response=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    local filename="$OUTPUT_DIR/image-$(date +%Y%m%d-%H%M%S).png"
+
+    # Try Venice native format (.images[0]), then OpenAI format (.data[0].b64_json)
+    local b64_data
+    b64_data=$(echo "$response" | jq -r '.images[0] // .data[0].b64_json // empty')
+
+    if [[ -n "$b64_data" ]]; then
+        info "Decoding image..."
+        echo "$b64_data" | base64 --decode > "$filename"
+        file_saved "Image" "$filename"
+        return
+    fi
+
+    # Check for URL format
+    local url
+    url=$(echo "$response" | jq -r '.data[0].url // empty')
+
+    if [[ -n "$url" ]]; then
+        info "Downloading image..."
+        curl -s "$url" -o "$filename"
+        file_saved "Image" "$filename"
+        return
+    fi
+
+    error "Failed to generate image"
+    echo ""
+    echo "Response: $response"
+}
+
+generate_audio() {
+    local text="$1"
+    local voice="${2:-af_sky}"
+
+    header "Audio Generation (TTS)"
+    info "Voice: ${CYAN}$voice${RESET}"
+    info "Text: ${CYAN}$text${RESET}"
+    echo ""
+
+    local filename="$OUTPUT_DIR/audio-$(date +%Y%m%d-%H%M%S).mp3"
+
+    info "Generating speech (this may take 5-15 seconds)..."
+
+    curl_with_spinner "Generating audio" "$filename" \
+        --max-time 60 "https://api.venice.ai/api/v1/audio/speech" \
+        -H "Authorization: Bearer $VENICE_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "{\"model\": \"tts-kokoro\", \"input\": $(json_encode "$text"), \"voice\": \"$voice\"}"
+
+    if [[ ! -s "$filename" ]]; then
+        rm -f "$filename"
+        error "Failed to generate audio (empty response)"
+        return 1
+    fi
+
+    if file "$filename" | grep -q "Audio\|MPEG\|audio\|data"; then
+        file_saved "Audio" "$filename"
+    else
+        local err_content
+        err_content=$(cat "$filename")
+        rm -f "$filename"
+        error "Failed to generate audio"
+        echo ""
+        echo "Response: $err_content"
+    fi
+}
+
+check_status() {
+    local queue_id="$1"
+    local model="${2:-sora-2-text-to-video}"
+
+    require_value "$queue_id" "status <queue-id>" "queue ID"
+
+    header "Video Status Check"
+    info "Queue ID: ${CYAN}$queue_id${RESET}"
+    info "Model: ${CYAN}$model${RESET}"
+    echo ""
+
+    info "Checking status..."
+
+    local tmpfile
+    tmpfile=$(mktemp)
+    curl -s "https://api.venice.ai/api/v1/video/retrieve" \
+        -H "Authorization: Bearer $VENICE_API_KEY" \
+        -H "Content-Type: application/json" \
+        -d "{\"queue_id\": \"$queue_id\", \"model\": \"$model\"}" \
+        -o "$tmpfile"
+
+    # Check if response is binary video data (starts with ftyp for mp4)
+    if head -c 8 "$tmpfile" | grep -q "ftyp"; then
+        local filename="$OUTPUT_DIR/video-$(date +%Y%m%d-%H%M%S).mp4"
+        mv "$tmpfile" "$filename"
+        file_saved "Video" "$filename"
+        return
+    fi
+
+    local response
+    response=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    local status
+    status=$(echo "$response" | jq -r '.status // "unknown"' 2>/dev/null)
+
+    case "$status" in
+        completed|done)
+            success "Video completed!"
+            local url
+            url=$(echo "$response" | jq -r '.video_url // .url // empty')
+            if [[ -n "$url" ]]; then
+                local filename="$OUTPUT_DIR/video-$(date +%Y%m%d-%H%M%S).mp4"
+                echo ""
+                info "Downloading video..."
+                curl_with_spinner "Downloading" "$filename" "$url"
+                file_saved "Video" "$filename"
+            else
+                warn "Video URL not found in response"
+                echo "Response: $response"
+            fi
+            ;;
+        failed|error)
+            error "Video generation failed"
+            local err_msg
+            err_msg=$(echo "$response" | jq -r '.error // .message // "Unknown error"')
+            echo ""
+            echo "Error: $err_msg"
+            ;;
+        processing|queued|pending|in_progress|PROCESSING|QUEUED|PENDING)
+            warn "Status: ${YELLOW}$status${RESET}"
+            show_progress_info "$response" "$queue_id"
+            ;;
+        *)
+            warn "Status: $status"
+            echo ""
+            echo "Full response:"
+            echo "$response" | jq . 2>/dev/null || echo "$response"
+            ;;
+    esac
+}
+
+show_progress_info() {
+    local response="$1"
+    local queue_id="$2"
+
+    local avg_time elapsed
+    avg_time=$(echo "$response" | jq -r '.average_execution_time // empty')
+    elapsed=$(echo "$response" | jq -r '.execution_duration // empty')
+
+    echo ""
+    if [[ -n "$avg_time" && -n "$elapsed" ]]; then
+        local avg_sec=$((avg_time / 1000))
+        local elapsed_sec=$((elapsed / 1000))
+        local remaining=$((avg_sec - elapsed_sec))
+        if [[ $remaining -gt 0 ]]; then
+            echo -e "  ${DIM}Elapsed: ${elapsed_sec}s / ~${avg_sec}s (about ${remaining}s remaining)${RESET}"
+        else
+            echo -e "  ${DIM}Elapsed: ${elapsed_sec}s (should complete soon)${RESET}"
+        fi
+    else
+        echo -e "  ${DIM}Video is still being generated.${RESET}"
+        echo -e "  ${DIM}This typically takes 1-5 minutes.${RESET}"
+    fi
+    echo ""
+    echo -e "  ${DIM}Check again with:${RESET}"
+    echo -e "    ${CYAN}venice-generate status $queue_id${RESET}"
+    echo ""
+}
+
+list_voices() {
+    header "Available TTS Voices"
+    echo ""
+    echo -e "  ${BOLD}Voice ID${RESET}        ${BOLD}Description${RESET}"
+    echo -e "  ${DIM}──────────────  ──────────────────────────────${RESET}"
+    echo -e "  ${CYAN}af_sky${RESET}          Female, American English ${DIM}(default)${RESET}"
+    echo -e "  ${CYAN}af_nova${RESET}         Female, American English"
+    echo -e "  ${CYAN}am_liam${RESET}         Male, American English"
+    echo -e "  ${CYAN}bf_emma${RESET}         Female, British English"
+    echo -e "  ${CYAN}bm_george${RESET}       Male, British English"
+    echo -e "  ${CYAN}jm_kumo${RESET}         Male, Japanese"
+    echo ""
+    echo -e "  ${DIM}Example:${RESET} venice-generate audio \"Hello\" --voice bf_emma"
+    echo ""
+}
+
+list_models() {
+    header "Available Models"
+    echo ""
+    echo -e "  ${BOLD}Video Generation${RESET}"
+    echo -e "  ${CYAN}sora-2-text-to-video${RESET}       Sora 2 text-to-video ${DIM}(default, \$0.44)${RESET}"
+    echo -e "  ${CYAN}sora-2-pro-text-to-video${RESET}   Sora 2 Pro text-to-video ${DIM}(\$1.32)${RESET}"
+    echo -e "  ${CYAN}sora-2-image-to-video${RESET}      Sora 2 image-to-video"
+    echo -e "  ${CYAN}wan-2.6-text-to-video${RESET}      Wan 2.6 text-to-video"
+    echo ""
+    echo -e "  ${BOLD}Image Generation${RESET}"
+    echo -e "  ${CYAN}nano-banana-pro${RESET}            Nano Banana Pro ${DIM}(default, \$0.18)${RESET}"
+    echo -e "  ${CYAN}z-image-turbo${RESET}              Fast generation"
+    echo ""
+    echo -e "  ${BOLD}Audio (TTS)${RESET}"
+    echo -e "  ${CYAN}tts-kokoro${RESET}                 Text-to-speech ${DIM}(auto-selected)${RESET}"
+    echo ""
+}
+
+show_help() {
+    show_banner
+    echo -e "${BOLD}venice-generate${RESET} v$VERSION"
+    echo -e "${DIM}Generate media via Venice.ai API${RESET}"
+    echo ""
+    echo -e "${BOLD}USAGE${RESET}"
+    echo -e "  venice-generate ${CYAN}<command>${RESET} [options]"
+    echo ""
+    echo -e "${BOLD}COMMANDS${RESET}"
+    echo -e "  ${CYAN}image${RESET} \"prompt\"     Generate an image"
+    echo -e "  ${CYAN}video${RESET} \"prompt\"     Generate a video (async)"
+    echo -e "  ${CYAN}audio${RESET} \"text\"       Generate speech audio"
+    echo -e "  ${CYAN}status${RESET} <queue-id>  Check video generation status"
+    echo -e "  ${CYAN}models${RESET}             List available models"
+    echo -e "  ${CYAN}voices${RESET}             List available TTS voices"
+    echo ""
+    echo -e "${BOLD}OPTIONS${RESET}"
+    echo -e "  ${DIM}Image:${RESET}"
+    echo -e "    --model, -m       Model to use (default: nano-banana-pro)"
+    echo -e "    --size, -s        Image size as WxH (default: 1024x1024)"
+    echo ""
+    echo -e "  ${DIM}Video:${RESET}"
+    echo -e "    --model, -m       Model to use (default: sora-2-text-to-video)"
+    echo -e "    --duration, -d    Duration: 4s, 5s, 10s (default: 4s)"
+    echo -e "    --aspect, -a      Aspect ratio: 16:9, 9:16, 1:1 (default: 16:9)"
+    echo ""
+    echo -e "  ${DIM}Audio:${RESET}"
+    echo -e "    --voice, -v       Voice ID (default: af_sky)"
+    echo ""
+    echo -e "  ${DIM}Status:${RESET}"
+    echo -e "    --model, -m       Model used for video (default: sora-2-text-to-video)"
+    echo ""
+    echo -e "${BOLD}EXAMPLES${RESET}"
+    echo -e "  ${DIM}# Generate an image${RESET}"
+    echo -e "  venice-generate image \"a cyberpunk city at sunset\""
+    echo ""
+    echo -e "  ${DIM}# Generate a video${RESET}"
+    echo -e "  venice-generate video \"a robot writing code\" --duration 5s"
+    echo ""
+    echo -e "  ${DIM}# Generate speech${RESET}"
+    echo -e "  venice-generate audio \"Hello world!\" --voice bf_emma"
+    echo ""
+    echo -e "  ${DIM}# Check video status${RESET}"
+    echo -e "  venice-generate status abc123-queue-id"
+    echo ""
+    echo -e "${BOLD}OUTPUT${RESET}"
+    echo -e "  Files are saved to: ${CYAN}$OUTPUT_DIR${RESET}"
+    echo ""
+}
+
+# Handle --mars easter egg first
+[[ "${1:-}" == "--mars" ]] && { show_mars; exit 0; }
+
+# Parse arguments
+case "${1:-}" in
+    video)
+        shift
+        prompt="" model="sora-2-text-to-video" duration="4s" aspect="16:9"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --model|-m) model="$2"; shift 2 ;;
+                --duration|-d) duration="$2"; shift 2 ;;
+                --aspect|-a) aspect="$2"; shift 2 ;;
+                --help|-h) show_help; exit 0 ;;
+                *) prompt="$1"; shift ;;
+            esac
+        done
+        require_value "$prompt" "video \"prompt\""
+        generate_video "$prompt" "$model" "$duration" "$aspect"
+        ;;
+    image)
+        shift
+        prompt="" model="nano-banana-pro" width=1024 height=1024
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --model|-m) model="$2"; shift 2 ;;
+                --size|-s) IFS='x' read -r width height <<< "$2"; shift 2 ;;
+                --width|-w) width="$2"; shift 2 ;;
+                --height) height="$2"; shift 2 ;;
+                --help|-h) show_help; exit 0 ;;
+                *) prompt="$1"; shift ;;
+            esac
+        done
+        require_value "$prompt" "image \"prompt\""
+        generate_image "$prompt" "$model" "$width" "$height"
+        ;;
+    audio)
+        shift
+        text="" voice="af_sky"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --voice|-v) voice="$2"; shift 2 ;;
+                --help|-h) show_help; exit 0 ;;
+                *) text="$1"; shift ;;
+            esac
+        done
+        require_value "$text" "audio \"text\"" "text"
+        generate_audio "$text" "$voice"
+        ;;
+    status)
+        shift
+        queue_id="" model="sora-2-text-to-video"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --model|-m) model="$2"; shift 2 ;;
+                --help|-h) show_help; exit 0 ;;
+                *) queue_id="$1"; shift ;;
+            esac
+        done
+        check_status "$queue_id" "$model"
+        ;;
+    voices) list_voices ;;
+    models) list_models ;;
+    --help|-h|help) show_help ;;
+    --version|-V) echo "venice-generate v$VERSION" ;;
+    "") show_help ;;
+    *)
+        error "Unknown command: $1"
+        echo ""
+        echo "Run 'venice-generate --help' for usage"
+        exit 1
+        ;;
+esac

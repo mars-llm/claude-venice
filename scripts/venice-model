@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# venice-model: List available Venice models
+#
+# Usage:
+#   venice-model list    # List available models
+
+set -e
+
+VERSION="${VERSION:-3.0.0}"
+
+# Colors
+if [[ -t 1 ]]; then
+    BOLD='\033[1m' DIM='\033[2m' CYAN='\033[0;36m' RESET='\033[0m'
+else
+    BOLD='' DIM='' CYAN='' RESET=''
+fi
+
+show_banner() {
+    [[ -t 1 ]] || return 0
+    echo -e "${CYAN}◢◣${RESET} ${BOLD}mars-llm${RESET} ${DIM}•${RESET} venice-model ${DIM}v${VERSION}${RESET}"
+}
+
+show_mars() {
+    echo -e "\033[0;36m"
+    cat << 'MARS'
+    ┌─┬─┬─┐
+    │ │ │ │    ╭─────────────╮
+   ┌┴─┴─┴─┴┐   │  mars-llm   │
+   │ ◣   ◢ │   ╰─────────────╯
+   │  ───  │  venice-model
+   └───────┘
+MARS
+    echo -e "\033[0m"
+    echo -e "  version: $VERSION"
+}
+
+list_models() {
+    echo "Available Venice models:"
+    echo ""
+    echo "  MODEL ID                    BEST FOR"
+    echo "  ─────────────────────────── ────────────────────────────────────────"
+    echo "  deepseek-r1-671b            Deep reasoning, math, chain-of-thought"
+    echo "  qwen-2.5-coder-32b          Code generation, debugging"
+    echo "  qwen3-235b                  Large context, complex analysis"
+    echo "  llama-3.3-70b               General purpose, fast"
+    echo "  venice-uncensored           Unrestricted queries"
+    echo ""
+    echo "Query a model: venice-ask -m <model-id> \"your question\""
+}
+
+# Handle --mars easter egg first
+[[ "${1:-}" == "--mars" ]] && { show_mars; exit 0; }
+
+case "${1:-}" in
+    list|ls)
+        list_models
+        ;;
+    --help|-h|*)
+        show_banner
+        echo "venice-model: List available Venice AI models"
+        echo ""
+        echo "Usage:"
+        echo "  venice-model list    List available models"
+        echo ""
+        echo "Query a model:"
+        echo "  venice-ask -m deepseek-r1-671b \"question\""
+        ;;
+esac

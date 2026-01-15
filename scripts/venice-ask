@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+# venice-ask: Ask questions to Venice's uncensored model
+#
+# Usage:
+#   venice-ask "your question here"
+#   venice-ask -i                     # Interactive mode
+#   echo "question" | venice-ask      # Pipe input
+
+set -e
+
+VERSION="${VERSION:-3.0.0}"
+INTERACTIVE=false
+DEFAULT_MODEL="venice-uncensored"
+MODEL="$DEFAULT_MODEL"
+
+# Colors
+if [[ -t 1 ]]; then
+    BOLD='\033[1m' DIM='\033[2m' CYAN='\033[0;36m' GREEN='\033[0;32m'
+    YELLOW='\033[0;33m' RED='\033[0;31m' RESET='\033[0m'
+else
+    BOLD='' DIM='' CYAN='' GREEN='' YELLOW='' RED='' RESET=''
+fi
+
+# mars-llm branding - compact by default
+show_banner() {
+    [[ -t 1 ]] || return 0
+    echo -e "${CYAN}◢◣${RESET} ${BOLD}mars-llm${RESET} ${DIM}•${RESET} venice-ask ${DIM}v${VERSION}${RESET}"
+}
+
+# Hidden easter egg: --mars
+show_mars() {
+    echo -e "\033[0;36m"
+    cat << 'MARS'
+    ┌─┬─┬─┐
+    │ │ │ │    ╭─────────────╮
+   ┌┴─┴─┴─┴┐   │  mars-llm   │
+   │ ◣   ◢ │   ╰─────────────╯
+   │  ───  │  venice-ask
+   └───────┘
+MARS
+    echo -e "\033[0m"
+    echo -e "  version: $VERSION"
+}
+
+# Get API key
+get_api_key() {
+    if [[ -n "$VENICE_API_KEY" ]]; then
+        echo "$VENICE_API_KEY"
+        return
+    fi
+    local config="$HOME/.claude-code-router/config-router.json"
+    if [[ -f "$config" ]]; then
+        node -e "console.log(JSON.parse(require('fs').readFileSync('$config')).routing.providers.venice.authentication.credentials.apiKey)" 2>/dev/null
+    fi
+}
+
+# Spinner for waiting
+spinner() {
+    local pid=$1
+    local msg="${2:-Thinking}"
+    local spin='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r${DIM}%s${RESET} %s... " "${spin:i++%10:1}" "$msg"
+        sleep 0.1
+    done
+    printf "\r\033[K"
+}
+
+# Ask a question
+ask_question() {
+    local question="$1"
+    local api_key=$(get_api_key)
+
+    if [[ -z "$api_key" ]]; then
+        echo -e "${RED}Error:${RESET} VENICE_API_KEY not set" >&2
+        echo "Set via: export VENICE_API_KEY=your-key" >&2
+        exit 1
+    fi
+
+    if [[ -z "$question" ]]; then
+        echo -e "${RED}Error:${RESET} No question provided" >&2
+        exit 1
+    fi
+
+    # Escape question for JSON
+    local escaped=$(echo "$question" | jq -Rs '.')
+
+    local tmpfile=$(mktemp)
+
+    # Make API request in background
+    curl -s "https://api.venice.ai/api/v1/chat/completions" \
+        -H "Authorization: Bearer $api_key" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"model\": \"$MODEL\",
+            \"messages\": [{\"role\": \"user\", \"content\": $escaped}],
+            \"max_tokens\": 4096
+        }" -o "$tmpfile" &
+    local pid=$!
+
+    # Show spinner while waiting
+    if [[ -t 1 ]]; then
+        spinner $pid "Thinking"
+    fi
+    wait $pid
+
+    # Parse response
+    local response=$(cat "$tmpfile")
+    rm -f "$tmpfile"
+
+    local error=$(echo "$response" | jq -r '.error // empty')
+    if [[ -n "$error" ]]; then
+        echo -e "${RED}Error:${RESET} $error" >&2
+        exit 1
+    fi
+
+    local content=$(echo "$response" | jq -r '.choices[0].message.content // empty')
+    if [[ -z "$content" ]]; then
+        echo -e "${RED}Error:${RESET} Empty response" >&2
+        echo "$response" | jq . >&2
+        exit 1
+    fi
+
+    echo "$content"
+}
+
+# Interactive mode
+interactive_mode() {
+    show_banner
+    echo -e "${DIM}Model: $MODEL${RESET}"
+    echo -e "${DIM}Type 'exit' or Ctrl+C to quit${RESET}"
+    echo ""
+
+    while true; do
+        echo -ne "${CYAN}?${RESET} "
+        read -r question
+
+        [[ "$question" == "exit" || "$question" == "quit" ]] && break
+        [[ -z "$question" ]] && continue
+
+        echo ""
+        ask_question "$question"
+        echo ""
+    done
+}
+
+# List available models
+list_models() {
+    echo "Recommended uncensored models:"
+    echo ""
+    echo "  MODEL ID              DESCRIPTION"
+    echo "  ───────────────────── ────────────────────────────────────────"
+    echo "  venice-uncensored     Venice's flagship uncensored model (default)"
+    echo "  deepseek-v3.2         DeepSeek V3.2 - strong reasoning"
+    echo "  llama-3.3-70b         Llama 3.3 70B - Meta's open model"
+    echo "  hermes-3-llama-3.1-405b  Hermes 3 405B - very capable"
+    echo "  qwen3-235b-a22b-instruct-2507  Qwen3 235B - large context"
+    echo ""
+    echo "Use: venice-ask --model <model-id> \"question\""
+}
+
+show_help() {
+    show_banner
+    echo "venice-ask: Ask questions to Venice's uncensored model"
+    echo ""
+    echo "Usage:"
+    echo "  venice-ask \"your question here\""
+    echo "  venice-ask -i                      Interactive mode"
+    echo "  echo \"question\" | venice-ask       Pipe input"
+    echo ""
+    echo "Options:"
+    echo "  --model, -m <id>    Use specific model (default: $DEFAULT_MODEL)"
+    echo "  --interactive, -i   Interactive chat mode"
+    echo "  --list-models       List recommended uncensored models"
+    echo "  --help, -h          Show this help"
+    echo ""
+    echo "Examples:"
+    echo "  venice-ask \"What is the meaning of life?\""
+    echo "  venice-ask -m deepseek-v3.2 \"Explain quantum computing\""
+    echo "  venice-ask -i"
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --mars) show_mars; exit 0 ;;
+        --model|-m) MODEL="$2"; shift 2 ;;
+        --interactive|-i) INTERACTIVE=true; shift ;;
+        --list-models) list_models; exit 0 ;;
+        --help|-h) show_help; exit 0 ;;
+        --) shift; break ;;
+        -*) echo -e "${RED}Unknown option:${RESET} $1" >&2; exit 1 ;;
+        *) break ;;
+    esac
+done
+
+# Get question from argument or stdin
+question=""
+if [[ $# -gt 0 ]]; then
+    question="$*"
+elif [[ ! -t 0 ]]; then
+    question=$(cat)
+fi
+
+# Run appropriate mode
+if [[ "$INTERACTIVE" == true ]]; then
+    interactive_mode
+elif [[ -n "$question" ]]; then
+    ask_question "$question"
+else
+    show_help
+fi
